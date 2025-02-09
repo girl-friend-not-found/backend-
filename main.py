@@ -32,7 +32,6 @@ async def chat_with_palm(request: Request):
         return {"reply": reply_text}
     
     except HTTPException as http_exc:
-        # 既に発生しているHTTPエラーはそのまま再送出
         logger.error(f"HTTP Exception: {http_exc.detail}")
         raise http_exc
     except Exception as e:

@@ -21,7 +21,6 @@ class PalmClient:
     def generate_reply(self, prompt: str) -> str:
         """
         入力プロンプトから応答テキストを生成する。
-        将来的にエラーチェックやパラメータ調整などを追加しやすい構造です。
         """
         try:
             response = self.model.generate_content(prompt)

@@ -4,4 +4,9 @@ __pycache__/
 .venv/
 venv/
 .idea/
-.vscode/ 
+.vscode/
+
+# 設定ファイルを除外
+config.py
+
+# 環境変数ファイルも除外することをお勧めします 

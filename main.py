@@ -4,7 +4,14 @@ from service.openai_client import OpenAIClient
 import logging
 from openai import OpenAI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from config import settings  # settingsをインポート
+import base64
+from io import BytesIO
+from PIL import Image
+import cv2
+import numpy as np
+from deepface import DeepFace
 
 # ロガーの設定（必要に応じて設定ファイルなどで詳細設定することも可能）
 logging.basicConfig(level=logging.INFO)
@@ -91,3 +98,25 @@ async def transcribe_audio(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Error during processing: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+    
+
+@app.post("/detect_emotion")
+async def deepface_detect(request: Request):
+    try:
+        body = await request.json()
+        data_url = body.get("img") # デフォルト値を設定
+        header, encoded_data = data_url.split(',', 1)
+        image_data = base64.b64decode(encoded_data)
+        image = Image.open(BytesIO(image_data))
+        # PIL画像からnumpy配列へ変換
+        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+        face_analysis = DeepFace.analyze(img_path = image_cv, actions=['emotion'])
+        emotion = face_analysis[0]['emotion']
+        emotion_return_array = {key: float(item) for key, item in emotion.items()}
+
+        return JSONResponse(emotion_return_array)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+

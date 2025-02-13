@@ -8,7 +8,7 @@
 
 1. 依存パッケージをインストール(必要に応じて仮想環境で)：
 ```bash
-pip install fastapi uvicorn google-generativeai openai python-dotenv tf_keras deepface opencv-python numpy
+pip install fastapi uvicorn google-generativeai openai python-dotenv tf_keras deepface opencv-python numpy python-multipart requests
 ```
 
 2.  環境設定

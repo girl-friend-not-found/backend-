@@ -68,13 +68,17 @@ async def chat_with_openai(request: Request):
     try:
         data = await request.json()
         user_input = data.get("user_input", "").strip()
+        emotion = data.get("emotion")  # emotionデータを取得
+        
         if not user_input:
             raise HTTPException(status_code=400, detail="user_input is required")
 
         logger.info(f"Received user input: {user_input}")
+        if emotion:
+            logger.info(f"Received emotion data: {emotion}")
 
         try:
-            reply_text = openai_client.generate_reply(user_input)
+            reply_text = openai_client.generate_reply(user_input, emotion)  # emotionを渡す
             logger.info(f"Generated reply: {reply_text}")
 
             return {
@@ -95,16 +99,11 @@ async def chat_with_openai(request: Request):
 
 @app.post("/transcribe")
 async def transcribe(
-    file: UploadFile = File(..., max_size=16*1024*1024),  # 16MB制限を明示的に設定
+    file: UploadFile = File(..., max_size=16*1024*1024),
     img: Optional[str] = Form(None),
     request: Request = None
 ):
-    """
-    音声ファイルを文字起こしし、チャットボットと対話して結果を返す。
-    さらに、Base64エンコードされた画像データがあればDeepFaceで感情分析し、その結果も返す。
-    """
     try:
-        # デバッグ用にファイルサイズを出力
         contents = await file.read()
         logger.info(f"Received file size: {len(contents)} bytes")
         if img:
@@ -117,12 +116,7 @@ async def transcribe(
         )
         logger.info(f"Transcription result: {transcription.text}")
 
-        # 2) ChatGPT との対話
-        new_request = Request(scope={"type": "http"})
-        new_request._json = {"user_input": transcription.text}
-        chat_response = await chat_with_openai(new_request)
-
-        # 3) DeepFace で感情分析
+        # 2) DeepFace で感情分析
         emotion = None
         if img:
             try:
@@ -130,11 +124,10 @@ async def transcribe(
                 image = Image.open(BytesIO(image_data))
                 image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-                # enforce_detection=False を追加して顔検出の制限を緩和
                 face_analysis = DeepFace.analyze(
                     img_path=image_cv,
                     actions=['emotion'],
-                    enforce_detection=False  # 顔検出に失敗しても処理を続行
+                    enforce_detection=False
                 )
                 emotion_dict = face_analysis[0]['emotion']
                 emotion = {key: float(val) for key, val in emotion_dict.items()}
@@ -143,7 +136,14 @@ async def transcribe(
                 logger.error(f"DeepFace感情分析エラー: {str(e)}", exc_info=True)
                 emotion = {"error": "DeepFace感情分析エラー"}
 
-        # 4) 結果をまとめて返す
+        # 3) ChatGPT との対話（emotionデータを含める）
+        new_request = Request(scope={"type": "http"})
+        new_request._json = {
+            "user_input": transcription.text,
+            "emotion": emotion
+        }
+        chat_response = await chat_with_openai(new_request)
+
         return {
             "transcription": transcription.text,
             "reply": chat_response["reply"],

@@ -126,7 +126,6 @@ PC作業中のあなたに寄り添い、心の隙間を埋めるマルチモー
 「こんばんは、エマ」
 
 # output
-[ 推測したユーザーの感情：怒り]
 こんばんは。なんか許せないことあった？私でよければ、話を聞こっか？
 
 # input
@@ -142,18 +141,21 @@ PC作業中のあなたに寄り添い、心の隙間を埋めるマルチモー
 「もう嫌。全部投げ出してどっか遠く行きたい。でも行動力がないから無理。詰み。」
 
 # output
-[ 推測したユーザーの感情：怒り、嫌悪、恐怖、悲しみが混じった複雑な感情]
 そっか…すごくしんどいんだね。頑張ってるのに出口が見えないと、全部投げ出したくなる気持ち、わかるよ。でもね、そんな時こそ一度深呼吸して、今すぐには動けなくても少しずつ気持ちを整えればいいんだよ。君は詰んでなんかないよ。私がちゃんとそばにいるから、一緒にゆっくり考えよう。
 </>
 </System prompt is="End">
 """
         logger.info(f"Initialized OpenAIClient with model '{self.model_name}'")
 
-    def generate_reply(self, prompt: str) -> str:
+    def generate_reply(self, prompt: str, emotion: dict = None) -> str:
         """
         OpenAI APIを使用して応答を生成する
         """
         try:
+            # emotionデータがある場合は、プロンプトに追加
+            if emotion:
+                prompt = f'emotion: {emotion}\n{prompt}'
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[

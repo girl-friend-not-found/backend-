@@ -73,55 +73,79 @@ async def chat_with_openai(request: Request):
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @app.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe(file: UploadFile = File(...), request: Request = None):
     """
-    音声ファイルを文字起こしし、その結果を/chat/openaiに送信してレスポンスを生成する
+    音声ファイルを文字起こしし、チャットボットと対話して結果を返す。
+    
+    さらに、リクエストボディに base64 エンコードされた画像データが含まれていれば、
+    DeepFace を使って感情分析の結果も返す。
     """
     try:
+        # 1) 音声ファイルを読み込み
         contents = await file.read()
         
+        # 2) Whisper を使った文字起こし
         transcription = client.audio.transcriptions.create(
             model="whisper-1",
             file=("audio.wav", contents, "audio/wav")
         )
-        
-        print("=== 文字起こし結果 ===")
-        print(transcription.text)
-        print("=====================")
         logger.info(f"Transcription result: {transcription.text}")
         
-        request = Request(scope={"type": "http"})
-        request._json = {"user_input": transcription.text}
-        chat_response = await chat_with_openai(request)
-        
+        # 3) ChatGPT との対話: Whisper のテキストを使って応答を生成
+        #   FastAPI でエンドポイントを呼び出すときに直接関数を再利用
+        new_request = Request(scope={"type": "http"})
+        new_request._json = {"user_input": transcription.text}
+        chat_response = await chat_with_openai(new_request)
+
+        # 4) DeepFace で感情分析が必要かをチェック
+        emotion = None
+        if request is not None:
+            try:
+                body = await request.json()
+                image_data_url = body.get("img")
+                if image_data_url:
+                    # DeepFace感情分析
+                    header, encoded_data = image_data_url.split(',', 1)
+                    image_data = base64.b64decode(encoded_data)
+                    image = Image.open(BytesIO(image_data))
+                    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                    face_analysis = DeepFace.analyze(img_path=image_cv, actions=['emotion'])
+                    emotion = face_analysis[0]['emotion']
+                    # float に変換（JSONシリアライズのため）
+                    emotion = {key: float(item) for key, item in emotion.items()}
+            except Exception as e:
+                # 感情分析が失敗しても他の情報は返す
+                logger.error(f"DeepFace感情分析エラー: {str(e)}", exc_info=True)
+                emotion = {"error": "DeepFace感情分析エラー"}
+
+        # 5) 結果をまとめて返す
         return {
             "transcription": transcription.text,
             "reply": chat_response["reply"],
-            "should_speak": True  # Unity側で音声合成するかどうかのフラグ
+            "should_speak": True,  # Unity側で音声合成するかどうかのフラグ
+            "emotion": emotion
         }
         
     except Exception as e:
         logger.error(f"Error during processing: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
-    
 
-@app.post("/detect_emotion")
-async def deepface_detect(request: Request):
-    try:
-        body = await request.json()
-        data_url = body.get("img") # デフォルト値を設定
-        header, encoded_data = data_url.split(',', 1)
-        image_data = base64.b64decode(encoded_data)
-        image = Image.open(BytesIO(image_data))
-        # PIL画像からnumpy配列へ変換
-        image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+# もう使わなくなった
+# @app.post("/detect_emotion")
+# async def deepface_detect(request: Request):
+#     try:
+#         body = await request.json()
+#         data_url = body.get("img") # デフォルト値を設定
+#         header, encoded_data = data_url.split(',', 1)
+#         image_data = base64.b64decode(encoded_data)
+#         image = Image.open(BytesIO(image_data))
+#         # PIL画像からnumpy配列へ変換
+#         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
-        face_analysis = DeepFace.analyze(img_path = image_cv, actions=['emotion'])
-        emotion = face_analysis[0]['emotion']
-        emotion_return_array = {key: float(item) for key, item in emotion.items()}
+#         face_analysis = DeepFace.analyze(img_path = image_cv, actions=['emotion'])
+#         emotion = face_analysis[0]['emotion']
+#         emotion_return_array = {key: float(item) for key, item in emotion.items()}
 
-        return JSONResponse(emotion_return_array)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
+#         return JSONResponse(emotion_return_array)
+#     except Exception as e:
+#         return JSONResponse({"error": str(e)}, status_code=500)

@@ -1,11 +1,13 @@
 # main.py
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional
 from service.openai_client import OpenAIClient
 import logging
 from openai import OpenAI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from config import settings  # settingsをインポート
+from config import settings
 import base64
 from io import BytesIO
 from PIL import Image
@@ -13,21 +15,49 @@ import cv2
 import numpy as np
 from deepface import DeepFace
 import os
-# TensorFlowの警告を抑制
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # TensorFlow のログレベルを設定
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # oneDNN カスタム操作を無効化
+from starlette.middleware.base import BaseHTTPMiddleware
 
-# ロガーの設定（必要に応じて設定ファイルなどで詳細設定することも可能）
+# TensorFlowの警告を抑制
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
-openai_client = OpenAIClient()
+# FastAPIのファイルアップロード制限を設定
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.requests import Request as StarletteRequest
 
-# OpenAIクライアントの初期化（settings経由でAPIキーを使用）
-client = OpenAI(
-    api_key=settings.OPENAI_API_KEY
+# アップロードサイズを16MBに設定
+StarletteUploadFile.spool_max_size = 16 * 1024 * 1024  # 16MB
+
+app = FastAPI()
+
+# ファイルサイズ制限を設定（例：10MB = 10 * 1024 * 1024）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+# アプリケーションの設定
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class CustomMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # クライアントの最大サイズを16MBに設定
+        request.scope["max_client_size"] = 16 * 1024 * 1024  # 16MB
+        response = await call_next(request)
+        return response
+
+app.add_middleware(CustomMiddleware)
+
+openai_client = OpenAIClient()
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 @app.get("/")
 def read_root():
@@ -35,33 +65,23 @@ def read_root():
 
 @app.post("/chat/openai")
 async def chat_with_openai(request: Request):
-    """
-    クライアント（例：Unity）からのJSON形式のリクエスト例：
-      {
-        "user_input": "こんにちは、調子はどう？"
-      }
-    """
     try:
         data = await request.json()
         user_input = data.get("user_input", "").strip()
         if not user_input:
             raise HTTPException(status_code=400, detail="user_input is required")
-        
-        # デバッグ用のログ追加
+
         logger.info(f"Received user input: {user_input}")
-        
+
         try:
-            # OpenAIClient を利用して応答生成
             reply_text = openai_client.generate_reply(user_input)
             logger.info(f"Generated reply: {reply_text}")
-            
-            # レスポンスにテキストと音声合成用のフラグを含める
+
             return {
                 "reply": reply_text,
-                "should_speak": True  # Unity側で音声合成するかどうかのフラグ
+                "should_speak": True
             }
         except Exception as e:
-            # OpenAI関連のエラーの詳細をログに出力
             logger.error(f"OpenAI API Error: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"OpenAI API Error: {str(e)}")
     
@@ -72,80 +92,65 @@ async def chat_with_openai(request: Request):
         logger.error(f"Unexpected error in /chat/openai endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
+
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...), request: Request = None):
+async def transcribe(
+    file: UploadFile = File(..., max_size=16*1024*1024),  # 16MB制限を明示的に設定
+    img: Optional[str] = Form(None),
+    request: Request = None
+):
     """
     音声ファイルを文字起こしし、チャットボットと対話して結果を返す。
-    
-    さらに、リクエストボディに base64 エンコードされた画像データが含まれていれば、
-    DeepFace を使って感情分析の結果も返す。
+    さらに、Base64エンコードされた画像データがあればDeepFaceで感情分析し、その結果も返す。
     """
     try:
-        # 1) 音声ファイルを読み込み
+        # デバッグ用にファイルサイズを出力
         contents = await file.read()
-        
-        # 2) Whisper を使った文字起こし
+        logger.info(f"Received file size: {len(contents)} bytes")
+        if img:
+            logger.info(f"Received image data size: {len(img)} bytes")
+
+        # 1) 音声ファイルを読み込み
         transcription = client.audio.transcriptions.create(
             model="whisper-1",
             file=("audio.wav", contents, "audio/wav")
         )
         logger.info(f"Transcription result: {transcription.text}")
-        
-        # 3) ChatGPT との対話: Whisper のテキストを使って応答を生成
-        #   FastAPI でエンドポイントを呼び出すときに直接関数を再利用
+
+        # 2) ChatGPT との対話
         new_request = Request(scope={"type": "http"})
         new_request._json = {"user_input": transcription.text}
         chat_response = await chat_with_openai(new_request)
 
-        # 4) DeepFace で感情分析が必要かをチェック
+        # 3) DeepFace で感情分析
         emotion = None
-        if request is not None:
+        if img:
             try:
-                body = await request.json()
-                image_data_url = body.get("img")
-                if image_data_url:
-                    # DeepFace感情分析
-                    header, encoded_data = image_data_url.split(',', 1)
-                    image_data = base64.b64decode(encoded_data)
-                    image = Image.open(BytesIO(image_data))
-                    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-                    face_analysis = DeepFace.analyze(img_path=image_cv, actions=['emotion'])
-                    emotion = face_analysis[0]['emotion']
-                    # float に変換（JSONシリアライズのため）
-                    emotion = {key: float(item) for key, item in emotion.items()}
+                image_data = base64.b64decode(img)
+                image = Image.open(BytesIO(image_data))
+                image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+                # enforce_detection=False を追加して顔検出の制限を緩和
+                face_analysis = DeepFace.analyze(
+                    img_path=image_cv,
+                    actions=['emotion'],
+                    enforce_detection=False  # 顔検出に失敗しても処理を続行
+                )
+                emotion_dict = face_analysis[0]['emotion']
+                emotion = {key: float(val) for key, val in emotion_dict.items()}
+
             except Exception as e:
-                # 感情分析が失敗しても他の情報は返す
                 logger.error(f"DeepFace感情分析エラー: {str(e)}", exc_info=True)
                 emotion = {"error": "DeepFace感情分析エラー"}
 
-        # 5) 結果をまとめて返す
+        # 4) 結果をまとめて返す
         return {
             "transcription": transcription.text,
             "reply": chat_response["reply"],
-            "should_speak": True,  # Unity側で音声合成するかどうかのフラグ
+            "should_speak": True,
             "emotion": emotion
         }
-        
+
     except Exception as e:
         logger.error(f"Error during processing: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
-
-# もう使わなくなった
-# @app.post("/detect_emotion")
-# async def deepface_detect(request: Request):
-#     try:
-#         body = await request.json()
-#         data_url = body.get("img") # デフォルト値を設定
-#         header, encoded_data = data_url.split(',', 1)
-#         image_data = base64.b64decode(encoded_data)
-#         image = Image.open(BytesIO(image_data))
-#         # PIL画像からnumpy配列へ変換
-#         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-#         face_analysis = DeepFace.analyze(img_path = image_cv, actions=['emotion'])
-#         emotion = face_analysis[0]['emotion']
-#         emotion_return_array = {key: float(item) for key, item in emotion.items()}
-
-#         return JSONResponse(emotion_return_array)
-#     except Exception as e:
-#         return JSONResponse({"error": str(e)}, status_code=500)

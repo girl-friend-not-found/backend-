@@ -12,6 +12,10 @@ from PIL import Image
 import cv2
 import numpy as np
 from deepface import DeepFace
+import os
+# TensorFlowの警告を抑制
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # TensorFlow のログレベルを設定
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # oneDNN カスタム操作を無効化
 
 # ロガーの設定（必要に応じて設定ファイルなどで詳細設定することも可能）
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +54,12 @@ async def chat_with_openai(request: Request):
             # OpenAIClient を利用して応答生成
             reply_text = openai_client.generate_reply(user_input)
             logger.info(f"Generated reply: {reply_text}")
-            return {"reply": reply_text}
+            
+            # レスポンスにテキストと音声合成用のフラグを含める
+            return {
+                "reply": reply_text,
+                "should_speak": True  # Unity側で音声合成するかどうかのフラグ
+            }
         except Exception as e:
             # OpenAI関連のエラーの詳細をログに出力
             logger.error(f"OpenAI API Error: {str(e)}", exc_info=True)
@@ -69,30 +78,26 @@ async def transcribe_audio(file: UploadFile = File(...)):
     音声ファイルを文字起こしし、その結果を/chat/openaiに送信してレスポンスを生成する
     """
     try:
-        # 音声ファイルを一時的に保存
         contents = await file.read()
         
-        # OpenAI Whisper APIを使用して文字起こし
         transcription = client.audio.transcriptions.create(
             model="whisper-1",
             file=("audio.wav", contents, "audio/wav")
         )
         
-        # 文字起こし結果をコンソールに表示
         print("=== 文字起こし結果 ===")
         print(transcription.text)
         print("=====================")
         logger.info(f"Transcription result: {transcription.text}")
         
-        # 文字起こし結果を/chat/openaiエンドポイントに送信
         request = Request(scope={"type": "http"})
         request._json = {"user_input": transcription.text}
         chat_response = await chat_with_openai(request)
         
-        # 両方の結果を返す
         return {
             "transcription": transcription.text,
-            "reply": chat_response["reply"]
+            "reply": chat_response["reply"],
+            "should_speak": True  # Unity側で音声合成するかどうかのフラグ
         }
         
     except Exception as e:

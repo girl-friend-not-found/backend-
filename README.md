@@ -42,6 +42,9 @@ curl -X POST -H "Content-Type: application/json" \
   "reply": "AIからの応答テキスト"
 }
 ```
+### `/transcribe` - 音声文字起こしとチャット応答
+
+音声ファイルをテキストに変換し、そのテキストを使用してチャット応答を生成します。
 
 ### `/detect_emotion` - Deepface感情分析
 

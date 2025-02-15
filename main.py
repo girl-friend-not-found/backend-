@@ -12,6 +12,10 @@ from PIL import Image
 import cv2
 import numpy as np
 from deepface import DeepFace
+import os
+# TensorFlowの警告を抑制
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # TensorFlow のログレベルを設定
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # oneDNN カスタム操作を無効化
 
 # ロガーの設定（必要に応じて設定ファイルなどで詳細設定することも可能）
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +54,12 @@ async def chat_with_openai(request: Request):
             # OpenAIClient を利用して応答生成
             reply_text = openai_client.generate_reply(user_input)
             logger.info(f"Generated reply: {reply_text}")
-            return {"reply": reply_text}
+            
+            # レスポンスにテキストと音声合成用のフラグを含める
+            return {
+                "reply": reply_text,
+                "should_speak": True  # Unity側で音声合成するかどうかのフラグ
+            }
         except Exception as e:
             # OpenAI関連のエラーの詳細をログに出力
             logger.error(f"OpenAI API Error: {str(e)}", exc_info=True)
@@ -67,47 +76,53 @@ async def chat_with_openai(request: Request):
 async def transcribe(file: UploadFile = File(...), request: Request = None):
     """
     音声ファイルを文字起こしし、チャットボットと対話して結果を返す。
+    
+    さらに、リクエストボディに base64 エンコードされた画像データが含まれていれば、
+    DeepFace を使って感情分析の結果も返す。
     """
     try:
-        # 音声ファイルを一時的に保存
+        # 1) 音声ファイルを読み込み
         contents = await file.read()
         
-        # OpenAI Whisper APIを使用して文字起こし
+        # 2) Whisper を使った文字起こし
         transcription = client.audio.transcriptions.create(
             model="whisper-1",
             file=("audio.wav", contents, "audio/wav")
         )
-        
-        # 文字起こし結果をコンソールに表示
-        print("=== 文字起こし結果 ===")
-        print(transcription.text)
-        print("=====================")
         logger.info(f"Transcription result: {transcription.text}")
         
-        # 文字起こし結果を/chat/openaiエンドポイントに送信
-        request = Request(scope={"type": "http"})
-        request._json = {"user_input": transcription.text}
-        chat_response = await chat_with_openai(request)
-        body = await request.json()
+        # 3) ChatGPT との対話: Whisper のテキストを使って応答を生成
+        #   FastAPI でエンドポイントを呼び出すときに直接関数を再利用
+        new_request = Request(scope={"type": "http"})
+        new_request._json = {"user_input": transcription.text}
+        chat_response = await chat_with_openai(new_request)
 
-        image_data_url = body.get("img") # デフォルト値を設定
-        # DeepFace感情分析
-        try:
-            header, encoded_data = image_data_url.split(',', 1)
-            image_data = base64.b64decode(encoded_data)
-            image = Image.open(BytesIO(image_data))
-            image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            face_analysis = DeepFace.analyze(img_path=image_cv, actions=['emotion'])
-            emotion = face_analysis[0]['emotion']
-            emotion = {key: float(item) for key, item in emotion.items()}
-        except Exception as e:
-            logger.error(f"DeepFace感情分析エラー: {str(e)}", exc_info=True)
-            emotion = {"error": "DeepFace感情分析エラー"}
+        # 4) DeepFace で感情分析が必要かをチェック
+        emotion = None
+        if request is not None:
+            try:
+                body = await request.json()
+                image_data_url = body.get("img")
+                if image_data_url:
+                    # DeepFace感情分析
+                    header, encoded_data = image_data_url.split(',', 1)
+                    image_data = base64.b64decode(encoded_data)
+                    image = Image.open(BytesIO(image_data))
+                    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                    face_analysis = DeepFace.analyze(img_path=image_cv, actions=['emotion'])
+                    emotion = face_analysis[0]['emotion']
+                    # float に変換（JSONシリアライズのため）
+                    emotion = {key: float(item) for key, item in emotion.items()}
+            except Exception as e:
+                # 感情分析が失敗しても他の情報は返す
+                logger.error(f"DeepFace感情分析エラー: {str(e)}", exc_info=True)
+                emotion = {"error": "DeepFace感情分析エラー"}
 
-        # 両方の結果を返す
+        # 5) 結果をまとめて返す
         return {
             "transcription": transcription.text,
             "reply": chat_response["reply"],
+            "should_speak": True,  # Unity側で音声合成するかどうかのフラグ
             "emotion": emotion
         }
         
